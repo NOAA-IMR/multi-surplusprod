@@ -116,7 +116,7 @@ ms.wide <- ms.long |>
   pivot_wider(names_from = type)
 
 ggplot(ms.long, aes(Year,value)) +
-  facet_wrap(~type) +
+  facet_wrap(~type, scale="fixed") +
   geom_point() +
   geom_smooth()
   
@@ -135,12 +135,28 @@ ggplot(all.wide, aes(Year,Catch, fill = species)) +
   geom_col()
 ```
 
+I also wanted to look at the contributions of each species to the summed ASP, so here is a plot of that.
+
+```{r, echo=F}
+ggplot(all.wide, aes(x=Year, y=asp, fill = species)) +
+  geom_col()
+
+
+
+ggplot(all.wide, aes(x=SSB, y=asp)) +
+geom_point(aes(color=Year)) + 
+  scale_color_gradient(low='white',high='blue') +
+  facet_wrap(~species)
+                          
+```
+
 Here is a plot of Biomass by ASP by species, with years labeled. Similar to Mueter's Fig 4, but mine isn't very clean.
 
 ```{r, warning=F, echo=F}
 ggplot(all.wide, aes(SSB, asp)) +
   geom_path() +
-  geom_text(aes(label=Year)) +
+  geom_text(aes(label=Year, colour=Year)) +
+  scale_colour_gradient(low="white", high="blue") +
   facet_wrap(~species)
 ```
 
@@ -149,7 +165,10 @@ Next, plot summed biomass vs summed asp. This is what we will fit the Schaefer o
 ```{r, echo=F, warning=F}
 ggplot(ms.wide, aes(SSB,asp)) +
   geom_point() +
-  geom_smooth(method='glm', formula = y ~ poly(x,2))
+  xlim(0, 1.8*10^7) +
+  ylim(0, 6*10^6)
+  
+  #geom_smooth(method='glm', formula = y ~ 0 + poly(x,2))
 
 ```
 
@@ -158,7 +177,7 @@ ggplot(ms.wide, aes(SSB,asp)) +
 The Schaefer model is just a multiple regression between ASP, linear and quadratic terms for B. We can fit this as a glm, forcing the intercept to be zero (unlike the above plot where the intercept was estimated.
 
 ```{r, warning=F}
-m1 <- glm(asp ~ 0+ SSB + I(SSB^2), data = ms.wide)
+m1 <- glm(asp ~ 0 + SSB + I(SSB^2), data = ms.wide)
 summary(m1)
 ```
 
@@ -168,6 +187,7 @@ If we predict outside the range of the data, we should be able to see where the 
 pframe <- data.frame(SSB = with(ms.wide, seq(0,2.5*10^7, length=100)))
 pframe$pred <- NA
 pframe$pred <- predict(m1, newdata = pframe)
+
 
 ggplot(ms.wide, aes(SSB,asp)) +
   geom_point() +
@@ -183,7 +203,7 @@ Something isn't working here right now. Optim is converging but the parameters d
 
 ```{r, warning=F}
 
-pellatom <- function(pars, asp, bio){
+pellatom <- function(pars, asp, bio, sigma){
   
   alpha <-pars[1]
   
@@ -193,9 +213,9 @@ pellatom <- function(pars, asp, bio){
   
   sigma <- pars[4]
   
-  asp.pred <- alpha*bio + beta*bio^(nu)
+  asp.pred <- (alpha*bio + beta*(bio^(nu)))
   
-  output <- sum(dnorm(log(asp), 
+  output <- - sum(dnorm(log(asp), 
                       log(max(0.00001,asp.pred)), 
                       sigma, 
                       log=TRUE), 
@@ -204,18 +224,91 @@ pellatom <- function(pars, asp, bio){
   return(output)
 }
 
-pars.init <- c(0.02, 0.01, 2, 5)
+alpha <- m1$coefficients [1]
+beta <- m1$coefficients [2]
+pars.init <- c(alpha, beta, 2, 0.75)
 
 ms.wide <- filter(ms.wide, !is.na(asp))
-asp <- ms.wide$asp
-bio <- ms.wide$SSB
+asp <- ms.wide$asp/10^6
+bio <- ms.wide$SSB/10^6
 
 res <- optim(pars.init, pellatom, asp=asp, bio=bio, hessian=TRUE)
 pars<-res$par
 
-ms.wide$pred <- pars[1]*bio + pars[2]*bio^(pars[3])
+K <- -pars[1]/pars[2]
 
-ggplot(ms.wide, aes(SSB,asp)) +
-  geom_point() +
-  geom_line(aes(SSB,pred))
+pred.df <- data.frame(pred.x=seq(0,K, length = 100), pred.y=NA)
+#pred.df$pred.x <- 
+
+pred.df <- pred.df |>
+  mutate(pred.y = pars[1]*pred.x + pars[2]*pred.x^(pars[3]))
+#pred.df$pred.y <- pars[1]*pred.x + pars[2]*pred.x^(pars[3])
+#ms.wide$pred <- pars[1]*bio + pars[2]*bio^(pars[3])
+
+
+ggplot(ms.wide, aes(SSB/(10^6),asp/(10^6))) +
+  #geom_point() +
+   geom_text(aes(label=Year, colour=Year)) +
+  scale_colour_gradient(low="white", high="blue") +
+  geom_line(aes(pred.x, ((pred.y))), data = pred.df) +
+  ylim(0,5.5)+
+  xlim(0,28)
+```
+
+I'm going to try to troubleshoot this by simulating some data. For linearized schaefer model, the alpha = r, and beta = -r/K. For example purposes, assume alpha = 1 and beta = -1. Simulate data, ignoring the negative values for now.
+
+```{r}
+
+r = 1
+K = 30
+
+alpha = r
+
+beta = -r/K
+
+pars.sim<- c(alpha, beta, 2, 0.01)
+sim.bio <- seq(0.01, .99*K, length = 100)
+
+pred <- pars.sim[1]*sim.bio + pars.sim[2]*(sim.bio^(pars.sim[3]))
+
+err <- rnorm(length(pred), mean=0, sd = pars.sim[4])
+
+pred.e <- exp(log(pred) + err)
+
+obs <- ifelse(pred.e > 0, pred.e, 0.0001)
+
+sim.dat <- data.frame(bio=sim.bio, pred=pred, obs=obs)
+
+ggplot(data=sim.dat, aes(bio,pred)) +
+  #geom_line() +
+  geom_point(aes(bio,obs))
+```
+
+Now, fit that simulated data using optim to see if we can get back the parameters we specified
+
+```{r}
+
+#pars.init <- c(.9, -.03, 2, 0.05)
+pars.init<-pars.sim
+
+bio = sim.dat$bio
+asp = sim.dat$obs
+res <- optim(pars.init, pellatom, asp=asp, bio=bio, hessian=TRUE)
+
+pars<-res$par
+
+pred.bio <- bio
+
+pred.y <- pars[1]*pred.bio + pars[2]*(pred.bio^(pars[3]))
+
+pred.dat <- data.frame(pred.bio=pred.bio, pred.asp=pred.y, obs.asp=asp)
+
+ggplot(data=pred.dat, aes(pred.bio, (pred.asp))) +
+  geom_line() +
+  geom_point(aes(pred.bio,obs.asp))
+
+
+
+
+
 ```
